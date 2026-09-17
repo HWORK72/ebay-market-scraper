@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+debug_page_*.png
+debug_screen.png
+.env
