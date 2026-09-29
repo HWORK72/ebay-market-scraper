@@ -1,5 +1,11 @@
 # eBay Market & Price Intelligence Scraper
 
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
+![Playwright](https://img.shields.io/badge/Playwright-Headless%20Automation-green?logo=playwright&logoColor=white)
+![WAF Evasion](https://img.shields.io/badge/WAF%20Evasion-Akamai%20Edge-red)
+![Architecture](https://img.shields.io/badge/Architecture-Asynchronous-orange)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 [🇷🇺 Читать на русском](README_RU.md)
 
 ---
