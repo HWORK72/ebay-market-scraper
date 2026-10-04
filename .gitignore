@@ -7,3 +7,4 @@ __pycache__/
 debug_page_*.png
 debug_screen.png
 .env
+browser_profile/

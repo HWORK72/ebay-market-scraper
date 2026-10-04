@@ -1,16 +1,21 @@
 import asyncio
 import logging
-from typing import List
+import random
+from pathlib import Path
+from typing import List, Optional
 from urllib.parse import urlparse, parse_qs, unquote_plus
 from bs4 import BeautifulSoup, Tag
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright_stealth import Stealth
 from models import ProductItem
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+
 class EbayScraper:
     def __init__(self, timeout: int = 30) -> None:
         self._timeout_ms: int = timeout * 1000 if timeout < 1000 else timeout
+        self._profile_dir: Path = Path("./browser_profile")
 
     def _extract_query(self, target_url: str) -> str:
         parsed_url = urlparse(target_url)
@@ -19,26 +24,23 @@ class EbayScraper:
             return unquote_plus(params["_nkw"][0])
         return "iphone 15 pro"
 
-    async def _smooth_scroll(self, page: Page) -> None:
-        scroll_script: str = """
-        async () => {
-            await new Promise((resolve) => {
-                let totalHeight = 0;
-                let distance = 350;
-                let timer = setInterval(() => {
-                    let scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    if (totalHeight >= scrollHeight - window.innerHeight) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 120);
-            });
-        }
-        """
+    async def _human_scroll(self, page: Page) -> None:
         try:
-            await page.evaluate(scroll_script)
+            viewport = page.viewport_size or {"width": 1280, "height": 800}
+            center_x: float = viewport["width"] / 2 + random.uniform(-50, 50)
+            center_y: float = viewport["height"] / 2 + random.uniform(-50, 50)
+            await page.mouse.move(center_x, center_y)
+
+            scroll_steps: int = random.randint(5, 8)
+            for _ in range(scroll_steps):
+                if page.is_closed():
+                    return
+                delta_y: int = random.randint(300, 650)
+                await page.mouse.wheel(0, delta_y)
+                await asyncio.sleep(random.uniform(0.3, 0.7))
+
+            await page.mouse.wheel(0, -random.randint(50, 150))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
         except Exception as exc:
             logger.warning(f"Scroll simulation notice: {exc}")
 
@@ -82,71 +84,91 @@ class EbayScraper:
 
     async def scrape_target(self, base_url: str, max_pages: int) -> List[ProductItem]:
         all_results: List[ProductItem] = []
-        search_query: str = self._extract_query(base_url)
+        stealth_engine: Stealth = Stealth()
+        self._profile_dir.mkdir(parents=True, exist_ok=True)
+        current_url: str = base_url
+
         async with async_playwright() as p:
-            browser: Browser = await p.chromium.launch(
+            context: BrowserContext = await p.chromium.launch_persistent_context(
+                user_data_dir=str(self._profile_dir.resolve()),
                 headless=False,
                 channel="chrome",
+                no_viewport=True,
+                locale="en-US",
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
-                    "--disable-features=Translate"
+                    "--disable-features=Translate",
+                    "--no-sandbox"
                 ]
             )
-            context: BrowserContext = await browser.new_context(
-                no_viewport=True,
-                locale="en-US"
-            )
-            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            page: Page = await context.new_page()
+            await stealth_engine.apply_stealth_async(context)
+            page: Page = context.pages[0] if context.pages else await context.new_page()
+
             try:
-                logger.info("Accessing eBay storefront directly")
-                await page.goto("https://www.ebay.com/", timeout=self._timeout_ms, wait_until="domcontentloaded")
-                await asyncio.sleep(2.0)
-                try:
-                    cookie_btn = page.locator("button:has-text('Accept All'), #gdpr-banner-accept")
-                    if await cookie_btn.count() > 0 and await cookie_btn.first.is_visible():
-                        logger.info("Dismissing GDPR cookie consent banner")
-                        await cookie_btn.first.click()
-                        await asyncio.sleep(1.0)
-                except Exception:
-                    pass
-                logger.info(f"Simulating human search query: '{search_query}'")
-                search_input = page.locator("#gh-ac")
-                await search_input.wait_for(timeout=10000)
-                await search_input.fill(search_query)
-                await asyncio.sleep(0.6)
-                logger.info("Executing search via keyboard Enter")
-                await search_input.press("Enter")
                 for page_num in range(1, max_pages + 1):
-                    logger.info(f"Processing search result page {page_num}/{max_pages}")
-                    await asyncio.sleep(3.0)
+                    if page.is_closed():
+                        logger.warning("Target browser page was closed prematurely")
+                        break
+
+                    logger.info(f"Processing catalog page {page_num}/{max_pages}: {current_url}")
+                    referer_header: str = "https://www.google.com/" if page_num == 1 else base_url
+                    await page.set_extra_http_headers({"Referer": referer_header})
+
+                    await page.goto(current_url, timeout=self._timeout_ms, wait_until="domcontentloaded")
+                    await asyncio.sleep(random.uniform(2.0, 3.5))
+
+                    page_title: str = await page.title()
+                    if "error" in page_title.lower() or "sorry" in page_title.lower():
+                        logger.critical(f"Akamai Edge WAF Block detected on page {page_num}. Page title: '{page_title}'")
+                        break
+
+                    if page_num == 1:
+                        try:
+                            cookie_btn = page.locator("button:has-text('Accept All'), #gdpr-banner-accept, button#gdpr-banner-accept")
+                            if await cookie_btn.count() > 0 and await cookie_btn.first.is_visible():
+                                logger.info("Dismissing GDPR cookie consent banner")
+                                await cookie_btn.first.click()
+                                await asyncio.sleep(1.0)
+                        except Exception:
+                            pass
+
                     try:
                         await page.wait_for_selector(".srp-results, li.s-card, li.s-item, div.s-item", state="attached", timeout=15000)
                     except Exception:
                         logger.warning(f"Timeout waiting for items on page {page_num}")
+
                     logger.info("Performing human-like page inspection")
-                    await self._smooth_scroll(page)
-                    await asyncio.sleep(1.5)
+                    await self._human_scroll(page)
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+
+                    if page.is_closed():
+                        break
+
                     html_content: str = await page.content()
                     parsed_items: List[ProductItem] = self.parse_items(html_content)
                     logger.info(f"Extracted {len(parsed_items)} items on page {page_num}")
                     all_results.extend(parsed_items)
+
                     if page_num < max_pages:
                         next_btn = page.locator("a.pagination__next")
-                        if await next_btn.count() > 0 and await next_btn.first.is_visible():
-                            logger.info("Scrolling down to pagination controls")
-                            await next_btn.first.scroll_into_view_if_needed()
-                            await asyncio.sleep(2.0)
-                            logger.info("Proceeding to next catalog page")
-                            await next_btn.first.click()
-                            await asyncio.sleep(4.0)
+                        if await next_btn.count() > 0:
+                            next_url: Optional[str] = await next_btn.first.get_attribute("href")
+                            if next_url and next_url.strip():
+                                current_url = next_url.strip()
+                                logger.info(f"Resolved next catalog URL: {current_url}")
+                                await asyncio.sleep(random.uniform(2.0, 3.5))
+                            else:
+                                logger.warning("Pagination link found but href attribute is empty")
+                                break
                         else:
-                            logger.warning("Next page pagination button not located")
+                            logger.warning("Next page pagination control not located")
                             break
+
             except Exception as exc:
                 logger.error(f"Execution error encountered: {exc}", exc_info=True)
             finally:
-                await context.close()
-                await browser.close()
+                if not context.pages or not page.is_closed():
+                    await context.close()
+
         return all_results
